@@ -1,0 +1,93 @@
+Program.Sub.Preflight.Start
+F.Data.DataTable.Create("LateWOByWC",True)
+F.Data.DataTable.AddColumn("LateWOByWC","BIRunID","Long")
+F.Data.DataTable.AddColumn("LateWOByWC","Job","String")
+F.Data.DataTable.AddColumn("LateWOByWC","Suffix","String")
+F.Data.DataTable.AddColumn("LateWOByWC","Seq","String")
+F.Data.DataTable.AddColumn("LateWOByWC","Part","String")
+F.Data.DataTable.AddColumn("LateWOByWC","Units_Open","Float")
+F.Data.DataTable.AddColumn("LateWOByWC","WC","String")
+F.Data.DataTable.AddColumn("LateWOByWC","Description","String")
+F.Data.DataTable.AddColumn("LateWOByWC","DateJobDue","Date")
+F.Data.DataTable.AddColumn("LateWOByWC","DateSeqDue","Date")
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+F.Intrinsic.Control.Try
+	V.Local.sSQL.Declare(String)
+	V.Local.sPreviousJob.Declare(String)
+	V.Local.sPreviousSuffix.Declare(String)
+	F.ODBC.Connection!con.OpenConnection(V.Ambient.PDSN,V.Ambient.PUser,V.Ambient.PPass)
+	'Build SQL query to grab all late sequences, then open recordset using the SQL query
+	F.Intrinsic.String.Build("SELECT H.Job, H.Suffix, O.Seq, H.Part, O.Units_Open, O.Workcenter, O.Description, H.Date_Due AS DateJobDue, O.Date_Due AS DateSeqDue FROM V_Job_Header AS H LEFT JOIN V_Job_Operations_WC AS O ON H.Job = O.Job AND H.Suffix = O.Suffix WHERE O.Date_Due < '{0}' AND O.Seq < '99000' AND H.Date_Closed = '1900-01-01' AND O.LMO IN ('O','L') AND O.Flag_Closed <> 'Y' AND NOT H.Part LIKE '%INDIRECT%' ORDER BY H.Job, H.Suffix, O.Seq",V.Ambient.Date.PervasiveDate,V.Local.sSQL)
+	F.ODBC.Connection!con.OpenLocalRecordsetRO("rstWO",V.Local.sSQL)
+	'Right now we have a recordset containing every late sequence that we are interested in ordered by job+suffix then seq. We only want the first late sequence for each job+suffix. To accomplish this we
+	'loop through the recordset. For each record we compare the job + suff to the previous one. If it is different we add that row to the datatable. Then we set the previous job + suffix to the current one
+	F.Intrinsic.Control.DoUntil(V.ODBC.con!rstWO.EOF,=,True)
+		F.Intrinsic.Control.If(V.ODBC.con!rstWO.FieldValString!Job,<>,V.Local.sPreviousJob,"OR",V.ODBC.con!rstWO.FieldValString!Suffix,<>,V.Local.sPreviousSuffix)
+			F.Data.DataTable.AddRow("LateWOByWC","Job",V.ODBC.con!rstWO.FieldValString!Job,"Suffix",V.ODBC.con!rstWO.FieldValString!Suffix,"Seq",V.ODBC.con!rstWO.FieldValString!Seq,"Part",V.ODBC.con!rstWO.FieldValString!Part,"Units_Open",V.ODBC.con!rstWO.FieldValFloat!Units_Open,"WC",V.ODBC.con!rstWO.FieldValString!WorkCenter,"Description",V.ODBC.con!rstWO.FieldValString!Description,"DateJobDue",V.ODBC.con!rstWO.FieldValPervasiveDate!DateJobDue,"DateSeqDue",V.ODBC.con!rstWO.FieldValPervasiveDate!DateSeqDue)
+		F.Intrinsic.Control.EndIf
+		
+		V.Local.sPreviousJob.Set(V.ODBC.con!rstWO.FieldValString!Job)
+		V.Local.sPreviousSuffix.Set(V.ODBC.con!rstWO.FieldValString!Suffix)
+		F.ODBC.con!rstWO.MoveNext
+	F.Intrinsic.Control.Loop
+	'Close recordset now that we are done with it
+	F.ODBC.con!rstWO.Close
+	
+	'The LateWOByWC datatable now contains the data we are interested in: the first late sequence per job+suffix. Now we call the generate report sub to build the report as needed.
+	F.Intrinsic.Control.CallSub(GenerateReport)
+	
+	F.Intrinsic.Control.CallSub(UnLoad)
+	
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.Main.End
+
+Program.Sub.GenerateReport.Start
+F.Intrinsic.Control.Try
+	V.Local.iRunID.Declare(Long)
+	V.Local.iLogID.Declare(Long)
+	V.Local.sSQL.Declare(String)
+	
+	'Retrieve BI run and log ID for report generation
+	F.Global.BI.GetRunID(V.Local.iRunID)
+	F.Global.BI.StartLogging(V.Local.iRunID,-1,-1,"",V.Local.iLogID)
+	
+	'Store BI run ID in datatable then write datatable to SQL. Close datatable now that we are finished with it.
+	F.Data.DataTable.SetValue("LateWOByWC",-1,"BIRunID",V.Local.iRunID)
+	F.Data.DataTable.SaveToDB("LateWOByWC","con","GCG_4675_LateWOByWC",V.DataTable.LateWOByWC.FieldNames,128)
+	F.Data.DataTable.Close("LateWOByWC")
+	
+	'Run report preprocessor.
+	F.Global.BI.RunReportPreProcessor(V.Local.iRunID,V.Local.iLogID,"","","",-1,False,"",-1,"",-1,"","",V.Local.iLogID)
+	
+	'Clear table of any data that was added
+	F.Intrinsic.String.Build("DELETE FROM GCG_4675_LateWOByWC WHERE BIRunID = '{0}'",V.Local.iRunID,V.Local.sSQL)
+	F.ODBC.Connection!con.Execute(V.Local.sSQL)
+	F.Global.BI.StopLogging(V.Local.iLogID)
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.GenerateReport.End
+
+Program.Sub.UnLoad.Start
+F.Intrinsic.Control.Try
+	F.ODBC.Connection!con.Close
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.Catch
+	F.Intrinsic.Control.CallSub(CatchError, "Sub", V.Ambient.CurrentSubroutine, "ErrNo", V.Ambient.ErrorNumber, "ErrDesc", V.Ambient.ErrorDescription)
+F.Intrinsic.Control.EndTry
+Program.Sub.UnLoad.End
+
+Program.Sub.CatchError.Start
+V.Local.sError.Declare(String)
+F.Intrinsic.String.Build("GCG_4675_LateWOrkOrderByWC{0}{0}Subroutine: {1}{0}Error {2} occured with description: {3}", V.Ambient.NewLine, V.Args.Sub, V.Args.ErrNo, V.Args.ErrDesc, V.Local.sError)
+F.Intrinsic.UI.Msgbox(V.Local.sError)
+F.Intrinsic.Control.If(V.Args.Sub,<>,"UNLOAD")
+	F.Intrinsic.Control.CallSub(UnLoad)
+F.Intrinsic.Control.Else
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.Endif
+Program.Sub.CatchError.End
